@@ -1,3 +1,4 @@
+from __future__ import annotations
 from numpy.typing import NDArray
 from dataclasses import dataclass
 import numpy as np
@@ -10,3 +11,4 @@ class ChannelData:
     x_label: str
     y_label: str
     properties: dict[str, str]
+

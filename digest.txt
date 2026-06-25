@@ -1,12 +1,15 @@
 Directory structure:
-└── DataProcessor/
+└── konsyi-data_processor/
+    ├── README.md
     ├── main.py
+    ├── Новый текстовый документ.txt
     ├── controller/
     │   ├── __init__.py
     │   └── main_controller.py
     ├── domain/
     │   ├── __init__.py
-    │   └── channel_data.py
+    │   ├── channel_data.py
+    │   └── formatting.py
     ├── model/
     │   ├── __init__.py
     │   └── tdms_model.py
@@ -17,6 +20,12 @@ Directory structure:
         ├── main_window.py
         ├── metadata_panel.py
         └── plot_panel.py
+
+================================================
+FILE: README.md
+================================================
+[Binary file]
+
 
 ================================================
 FILE: main.py
@@ -53,6 +62,12 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+================================================
+FILE: Новый текстовый документ.txt
+================================================
+[Binary file]
 
 
 ================================================
@@ -263,6 +278,27 @@ class ChannelData:
     x_label: str
     y_label: str
     properties: dict[str, str]
+
+
+================================================
+FILE: domain/formatting.py
+================================================
+@staticmethod
+def _format_int(value: int) -> str:
+    return f"{value:,}".replace(",", " ")
+
+
+@staticmethod
+def _format_float(value: float) -> str:
+    return f"{value:.6g}"
+
+
+@staticmethod
+def _safe_filename(text: str) -> str:
+    cleaned = text.replace("/", "_").replace("\\", "_")
+    cleaned = re.sub(r'[^0-9A-Za-zА-Яа-я._ -]+', "_", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned or "channel"
 
 
 ================================================
@@ -522,29 +558,11 @@ FILE: ui/file_panel.py
 ================================================
 from __future__ import annotations
 
-import re
-import sys
-from dataclasses import dataclass
-from pathlib import Path
-
-import numpy as np
-import pyqtgraph as pg
-from nptdms import TdmsFile
-from numpy.typing import NDArray
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QAction
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QApplication,
     QFileDialog,
     QLabel,
-    QLineEdit,
-    QMainWindow,
-    QMessageBox,
-    QPlainTextEdit,
     QPushButton,
-    QSplitter,
-    QTreeWidget,
-    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
