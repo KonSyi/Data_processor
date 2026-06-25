@@ -1,28 +1,10 @@
 from __future__ import annotations
 
-import re
-import sys
-from dataclasses import dataclass
-from pathlib import Path
-
-import numpy as np
-import pyqtgraph as pg
-from nptdms import TdmsFile
-from numpy.typing import NDArray
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QAction
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QApplication,
     QFileDialog,
     QLabel,
-    QLineEdit,
-    QMainWindow,
-    QMessageBox,
-    QPlainTextEdit,
     QPushButton,
-    QSplitter,
-    QTreeWidget,
-    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )

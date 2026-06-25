@@ -1,0 +1,750 @@
+Directory structure:
+└── DataProcessor/
+    ├── main.py
+    ├── controller/
+    │   ├── __init__.py
+    │   └── main_controller.py
+    ├── domain/
+    │   ├── __init__.py
+    │   └── channel_data.py
+    ├── model/
+    │   ├── __init__.py
+    │   └── tdms_model.py
+    └── ui/
+        ├── __init__.py
+        ├── channel_tree.py
+        ├── file_panel.py
+        ├── main_window.py
+        ├── metadata_panel.py
+        └── plot_panel.py
+
+================================================
+FILE: main.py
+================================================
+from __future__ import annotations
+
+import sys
+
+import pyqtgraph as pg
+from PySide6.QtWidgets import QApplication
+
+from ui.main_window import MainWindow
+from model.tdms_model import TdmsModel
+from controller.main_controller import MainController
+
+def main() -> None:
+    pg.setConfigOptions(background="w", foreground="k", antialias=False)
+
+    app = QApplication(sys.argv)
+    app.setApplicationName("TDMS Viewer")
+
+    model = TdmsModel()
+    window = MainWindow()
+    controller = MainController(model, window)
+
+    # Чтобы объекты точно жили до конца приложения
+    window._controller = controller  # type: ignore[attr-defined]
+
+    app.aboutToQuit.connect(model.close)
+
+    window.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
+
+
+================================================
+FILE: controller/__init__.py
+================================================
+[Empty file]
+
+
+================================================
+FILE: controller/main_controller.py
+================================================
+from __future__ import annotations
+
+import re
+
+from pathlib import Path
+import numpy as np
+
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QMessageBox,
+)
+
+from ui.main_window import MainWindow
+from  model.tdms_model import TdmsModel
+from domain.channel_data import ChannelData
+
+class MainController:
+    def __init__(self, model: TdmsModel, window: MainWindow) -> None:
+        self.model = model
+        self.window = window
+        self.current_channel: ChannelData | None = None
+
+        self.window.file_panel.file_selected.connect(self.open_file)
+        self.window.channel_tree.channel_selected.connect(self.show_channel)
+        self.window.open_action.triggered.connect(self.window.file_panel.open_dialog)
+        self.window.export_csv_action.triggered.connect(self.export_current_channel)
+        self.window.exit_action.triggered.connect(self.window.close)
+        self.window.about_action.triggered.connect(self.show_about)
+
+
+    def open_file(self, path: str) -> None:
+        try:
+            self.model.load(path)
+            structure = self.model.get_structure()
+            file_info = self.model.get_file_info()
+
+            self.current_channel = None
+            self.window.set_export_enabled(False)
+            self.window.file_panel.set_current_file(path)
+            self.window.channel_tree.set_structure(structure)
+            self.window.metadata_panel.set_properties("Информация о файле", file_info)
+            self.window.plot_panel.clear_plot("Файл загружен. Выберите канал слева.")
+            self.window.setWindowTitle(f"TDMS Viewer — {Path(path).name}")
+            self.window.statusBar().showMessage(f"Загружен файл: {Path(path).name}")
+
+        except Exception as exc:
+            QMessageBox.critical(
+                self.window,
+                "Ошибка загрузки",
+                f"Не удалось открыть файл:\n{exc}",
+            )
+
+    def show_channel(self, group_name: str, channel_name: str) -> None:
+        try:
+            channel_data = self.model.get_channel_data(group_name, channel_name)
+            self.current_channel = channel_data
+
+            self.window.plot_panel.plot_channel(channel_data)
+            self.window.metadata_panel.set_properties(
+                channel_data.title,
+                self._build_channel_properties(channel_data),
+            )
+            self.window.set_export_enabled(True)
+            self.window.statusBar().showMessage(f"Показан канал: {channel_data.title}")
+
+        except Exception as exc:
+            QMessageBox.critical(
+                self.window,
+                "Ошибка отображения",
+                f"Не удалось показать канал:\n{exc}",
+            )
+
+    def export_current_channel(self) -> None:
+        if self.current_channel is None:
+            QMessageBox.information(
+                self.window,
+                "Экспорт",
+                "Сначала выберите канал.",
+            )
+            return
+
+        default_name = self._safe_filename(self.current_channel.title) + ".csv"
+
+        path, _ = QFileDialog.getSaveFileName(
+            self.window,
+            "Сохранить CSV",
+            default_name,
+            "CSV files (*.csv);;All files (*.*)",
+        )
+        if not path:
+            return
+
+        try:
+            data = np.column_stack((self.current_channel.x, self.current_channel.y))
+            header = f"{self.current_channel.x_label};{self.current_channel.y_label}"
+
+            with open(path, "w", encoding="utf-8", newline="") as file_obj:
+                np.savetxt(
+                    file_obj,
+                    data,
+                    delimiter=";",
+                    header=header,
+                    comments="",
+                    fmt="%.12g",
+                )
+
+            self.window.statusBar().showMessage(
+                f"CSV сохранён: {Path(path).name}",
+                5000,
+            )
+
+        except Exception as exc:
+            QMessageBox.critical(
+                self.window,
+                "Ошибка экспорта",
+                f"Не удалось сохранить CSV:\n{exc}",
+            )
+
+    def show_about(self) -> None:
+        QMessageBox.information(
+            self.window,
+            "О программе",
+            "TDMS Viewer\n\n"
+            "Минимальное настольное приложение для просмотра TDMS:\n"
+            "- открытие TDMS\n"
+            "- дерево каналов\n"
+            "- график\n"
+            "- свойства и статистика\n"
+            "- экспорт канала в CSV",
+        )
+
+    def _build_channel_properties(self, channel_data: ChannelData) -> dict[str, str]:
+        y = channel_data.y
+        finite = y[np.isfinite(y)]
+
+        info: dict[str, str] = {
+            "Точек": self._format_int(len(y)),
+            "NaN/inf": self._format_int(int(len(y) - len(finite))),
+        }
+
+        if len(finite) > 0:
+            info.update(
+                {
+                    "Минимум": self._format_float(float(np.min(finite))),
+                    "Максимум": self._format_float(float(np.max(finite))),
+                    "Среднее": self._format_float(float(np.mean(finite))),
+                    "Std": self._format_float(float(np.std(finite))),
+                }
+            )
+        else:
+            info.update(
+                {
+                    "Минимум": "нет конечных значений",
+                    "Максимум": "нет конечных значений",
+                    "Среднее": "нет конечных значений",
+                    "Std": "нет конечных значений",
+                }
+            )
+
+        info.update(channel_data.properties)
+        return info
+
+    @staticmethod
+    def _format_int(value: int) -> str:
+        return f"{value:,}".replace(",", " ")
+
+    @staticmethod
+    def _format_float(value: float) -> str:
+        return f"{value:.6g}"
+
+    @staticmethod
+    def _safe_filename(text: str) -> str:
+        cleaned = text.replace("/", "_").replace("\\", "_")
+        cleaned = re.sub(r'[^0-9A-Za-zА-Яа-я._ -]+', "_", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned or "channel"
+
+
+================================================
+FILE: domain/__init__.py
+================================================
+[Empty file]
+
+
+================================================
+FILE: domain/channel_data.py
+================================================
+from numpy.typing import NDArray
+from dataclasses import dataclass
+import numpy as np
+
+@dataclass(frozen=True)
+class ChannelData:
+    title: str
+    x: NDArray[np.float64]
+    y: NDArray[np.float64]
+    x_label: str
+    y_label: str
+    properties: dict[str, str]
+
+
+================================================
+FILE: model/__init__.py
+================================================
+[Empty file]
+
+
+================================================
+FILE: model/tdms_model.py
+================================================
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+from nptdms import TdmsFile
+from numpy.typing import NDArray
+
+from domain.channel_data import ChannelData
+
+class TdmsModel:
+    """Работа только с данными TDMS. GUI здесь нет."""
+
+    def __init__(self) -> None:
+        self.path: Path | None = None
+        self._tdms: TdmsFile | None = None
+
+    def close(self) -> None:
+        if self._tdms is not None and hasattr(self._tdms, "close"):
+            try:
+                self._tdms.close()
+            except Exception:
+                pass
+        self._tdms = None
+        self.path = None
+
+    def load(self, path: str | Path) -> None:
+        file_path = Path(path)
+
+        if not file_path.exists():
+            raise FileNotFoundError(f"Файл не найден: {file_path}")
+
+        self.close()
+
+        # Ленивая загрузка: метаданные читаются сразу, данные канала — по запросу.
+        self._tdms = TdmsFile.open(str(file_path))
+        self.path = file_path
+
+    def get_structure(self) -> dict[str, list[str]]:
+        tdms = self._require_file()
+        structure: dict[str, list[str]] = {}
+
+        for group in tdms.groups():
+            structure[group.name] = [channel.name for channel in group.channels()]
+
+        return structure
+
+    def get_file_info(self) -> dict[str, str]:
+        structure = self.get_structure()
+
+        return {
+            "Файл": self.path.name if self.path else "",
+            "Путь": str(self.path) if self.path else "",
+            "Групп": str(len(structure)),
+            "Каналов": str(sum(len(channels) for channels in structure.values())),
+        }
+
+    def get_channel_data(self, group_name: str, channel_name: str) -> ChannelData:
+        tdms = self._require_file()
+
+        group = tdms[group_name]
+        channel = group[channel_name]
+
+        y_raw = np.asarray(channel[:])
+
+        if y_raw.ndim > 1:
+            y_raw = y_raw.reshape(-1)
+
+        if not np.issubdtype(y_raw.dtype, np.number):
+            raise ValueError(
+                f"Канал '{group_name} / {channel_name}' не является числовым "
+                f"(dtype={y_raw.dtype}) и не может быть показан на графике."
+            )
+
+        y = y_raw.astype(np.float64, copy=False)
+        x, x_label = self._build_x_axis(channel, len(y))
+        y_label = self._extract_y_label(channel)
+
+        properties = {
+            str(key): self._format_property(value)
+            for key, value in channel.properties.items()
+        }
+        properties.setdefault("Размер массива", str(len(y)))
+        properties.setdefault("Тип данных", str(y_raw.dtype))
+
+        return ChannelData(
+            title=f"{group_name} / {channel_name}",
+            x=x,
+            y=y,
+            x_label=x_label,
+            y_label=y_label,
+            properties=properties,
+        )
+
+    def _require_file(self) -> TdmsFile:
+        if self._tdms is None:
+            raise RuntimeError("TDMS файл ещё не загружен")
+        return self._tdms
+
+    def _build_x_axis(self, channel, length: int) -> tuple[NDArray[np.float64], str]:
+        if length == 0:
+            return np.array([], dtype=np.float64), "Отсчёт"
+
+        try:
+            x_raw = np.asarray(channel.time_track())
+
+            if x_raw.ndim > 1:
+                x_raw = x_raw.reshape(-1)
+
+            if np.issubdtype(x_raw.dtype, np.number):
+                return x_raw.astype(np.float64, copy=False), "Время, с"
+
+            if np.issubdtype(x_raw.dtype, np.timedelta64):
+                x_ns = x_raw.astype("timedelta64[ns]").astype(np.int64)
+                return (x_ns / 1e9).astype(np.float64, copy=False), "Время, с"
+
+            if np.issubdtype(x_raw.dtype, np.datetime64):
+                x_ns = x_raw.astype("datetime64[ns]").astype(np.int64)
+                x_sec = (x_ns - x_ns[0]) / 1e9
+                return x_sec.astype(np.float64, copy=False), "Время от начала, с"
+
+        except Exception:
+            pass
+
+        return np.arange(length, dtype=np.float64), "Отсчёт"
+
+    def _extract_y_label(self, channel) -> str:
+        for key in ("unit_string", "NI_UnitDescription", "wf_yunit_string"):
+            value = channel.properties.get(key)
+            if value is not None and str(value).strip():
+                return f"Значение, {value}"
+        return "Значение"
+
+    @staticmethod
+    def _format_property(value: object) -> str:
+        if isinstance(value, np.ndarray):
+            return f"array(shape={value.shape}, dtype={value.dtype})"
+        return str(value)
+
+
+================================================
+FILE: ui/__init__.py
+================================================
+[Empty file]
+
+
+================================================
+FILE: ui/channel_tree.py
+================================================
+from __future__ import annotations
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
+    QLabel,
+    QLineEdit,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+class ChannelTree(QWidget):
+    channel_selected = Signal(str, str)
+
+    def __init__(self) -> None:
+        super().__init__()
+
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText("Фильтр по имени группы или канала...")
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Группы / каналы"])
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setUniformRowHeights(True)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Каналы"))
+        layout.addWidget(self.filter_edit)
+        layout.addWidget(self.tree)
+
+        self.filter_edit.textChanged.connect(self._apply_filter)
+        self.tree.currentItemChanged.connect(self._on_current_item_changed)
+
+    def set_structure(self, structure: dict[str, list[str]]) -> None:
+        self.tree.clear()
+
+        for group_name, channel_names in structure.items():
+            group_item = QTreeWidgetItem([group_name])
+
+            for channel_name in channel_names:
+                channel_item = QTreeWidgetItem([channel_name])
+                channel_item.setData(0, Qt.UserRole, (group_name, channel_name))
+                group_item.addChild(channel_item)
+
+            self.tree.addTopLevelItem(group_item)
+            group_item.setExpanded(True)
+
+        self._apply_filter(self.filter_edit.text())
+
+    def _on_current_item_changed(
+        self,
+        current: QTreeWidgetItem | None,
+        previous: QTreeWidgetItem | None,
+    ) -> None:
+        del previous
+
+        if current is None:
+            return
+
+        payload = current.data(0, Qt.UserRole)
+        if payload is None:
+            return
+
+        group_name, channel_name = payload
+        self.channel_selected.emit(group_name, channel_name)
+
+    def _apply_filter(self, text: str) -> None:
+        query = text.strip().lower()
+
+        for i in range(self.tree.topLevelItemCount()):
+            group_item = self.tree.topLevelItem(i)
+            group_name = group_item.text(0).lower()
+
+            group_matches = query in group_name if query else True
+            any_child_visible = False
+
+            for j in range(group_item.childCount()):
+                child_item = group_item.child(j)
+                child_name = child_item.text(0).lower()
+
+                child_matches = query in child_name if query else True
+                visible = (not query) or group_matches or child_matches
+
+                child_item.setHidden(not visible)
+                any_child_visible = any_child_visible or visible
+
+            group_visible = (not query) or group_matches or any_child_visible
+            group_item.setHidden(not group_visible)
+
+            if query and group_visible:
+                group_item.setExpanded(True)
+
+
+================================================
+FILE: ui/file_panel.py
+================================================
+from __future__ import annotations
+
+import re
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+import pyqtgraph as pg
+from nptdms import TdmsFile
+from numpy.typing import NDArray
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QAction
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QSplitter,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+class FilePanel(QWidget):
+    file_selected = Signal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+
+        self.info_label = QLabel("Файл не выбран")
+        self.info_label.setWordWrap(True)
+
+        self.open_button = QPushButton("Открыть TDMS")
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Файл"))
+        layout.addWidget(self.info_label)
+        layout.addWidget(self.open_button)
+
+        self.open_button.clicked.connect(self.open_dialog)
+
+    def open_dialog(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Открыть TDMS файл",
+            "",
+            "TDMS files (*.tdms);;All files (*.*)",
+        )
+        if path:
+            self.file_selected.emit(path)
+
+    def set_current_file(self, path: str | None) -> None:
+        self.info_label.setText(path if path else "Файл не выбран")
+
+
+================================================
+FILE: ui/main_window.py
+================================================
+from __future__ import annotations
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction
+from PySide6.QtWidgets import (
+    QMainWindow,
+    QSplitter,
+)
+
+from ui.file_panel import FilePanel
+from ui.channel_tree import ChannelTree
+from ui.plot_panel import PlotPanel
+from ui.metadata_panel import MetadataPanel
+# from ui.processing_panel import FilePanel
+
+class MainWindow(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+
+        self.setWindowTitle("TDMS Viewer")
+        self.resize(1300, 850)
+
+        self.file_panel = FilePanel()
+        self.channel_tree = ChannelTree()
+        self.plot_panel = PlotPanel()
+        self.metadata_panel = MetadataPanel()
+
+        self.open_action = QAction("Открыть TDMS...", self)
+        self.open_action.setShortcut("Ctrl+O")
+
+        self.export_csv_action = QAction("Экспорт текущего канала в CSV...", self)
+        self.export_csv_action.setShortcut("Ctrl+S")
+        self.export_csv_action.setEnabled(False)
+
+        self.exit_action = QAction("Выход", self)
+        self.exit_action.setShortcut("Ctrl+Q")
+
+        self.about_action = QAction("О программе", self)
+
+        self._build_menu()
+        self._build_layout()
+
+        self.statusBar().showMessage("Готово")
+
+    def _build_menu(self) -> None:
+        file_menu = self.menuBar().addMenu("Файл")
+        file_menu.addAction(self.open_action)
+        file_menu.addAction(self.export_csv_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.exit_action)
+
+        help_menu = self.menuBar().addMenu("Справка")
+        help_menu.addAction(self.about_action)
+
+    def _build_layout(self) -> None:
+        left_splitter = QSplitter(Qt.Vertical)
+        left_splitter.addWidget(self.file_panel)
+        left_splitter.addWidget(self.channel_tree)
+        left_splitter.addWidget(self.metadata_panel)
+        left_splitter.setSizes([120, 380, 260])
+
+        main_splitter = QSplitter(Qt.Horizontal)
+        main_splitter.addWidget(left_splitter)
+        main_splitter.addWidget(self.plot_panel)
+        main_splitter.setSizes([420, 880])
+        main_splitter.setStretchFactor(1, 1)
+
+        self.setCentralWidget(main_splitter)
+
+    def set_export_enabled(self, enabled: bool) -> None:
+        self.export_csv_action.setEnabled(enabled)
+
+
+================================================
+FILE: ui/metadata_panel.py
+================================================
+from __future__ import annotations
+
+from PySide6.QtWidgets import (
+    QLabel,
+    QPlainTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+
+class MetadataPanel(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+
+        self.text = QPlainTextEdit()
+        self.text.setReadOnly(True)
+        self.text.setLineWrapMode(QPlainTextEdit.NoWrap)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Свойства / статистика"))
+        layout.addWidget(self.text)
+
+    def set_properties(self, title: str, properties: dict[str, str]) -> None:
+        lines = [title, "=" * len(title), ""]
+
+        if not properties:
+            lines.append("Нет данных")
+        else:
+            max_key_len = max(len(key) for key in properties)
+            for key, value in properties.items():
+                lines.append(f"{key:<{max_key_len}} : {value}")
+
+        self.text.setPlainText("\n".join(lines))
+
+
+================================================
+FILE: ui/plot_panel.py
+================================================
+from __future__ import annotations
+
+import pyqtgraph as pg
+from PySide6.QtWidgets import (
+    QLabel,
+    QVBoxLayout,
+    QWidget,
+)
+
+class PlotPanel(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+
+        self.caption_label = QLabel("Откройте файл и выберите канал")
+
+        self.plot_widget = pg.PlotWidget()
+        self.plot_widget.setBackground("w")
+
+        plot_item = self.plot_widget.getPlotItem()
+        plot_item.showGrid(x=True, y=True, alpha=0.3)
+        plot_item.setDownsampling(auto=True, mode="peak")
+        plot_item.setClipToView(True)
+
+        self.curve = self.plot_widget.plot(
+            [],
+            [],
+            pen=pg.mkPen(color="#1f77b4", width=1.2),
+        )
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("График"))
+        layout.addWidget(self.caption_label)
+        layout.addWidget(self.plot_widget)
+
+    def clear_plot(self, message: str = "Откройте файл и выберите канал") -> None:
+        self.curve.setData([], [])
+        self.plot_widget.setTitle("")
+        self.plot_widget.setLabel("bottom", "")
+        self.plot_widget.setLabel("left", "")
+        self.caption_label.setText(message)
+
+    def plot_channel(self, data: ChannelData) -> None:
+        self.curve.setData(data.x, data.y)
+        self.plot_widget.setTitle(data.title)
+        self.plot_widget.setLabel("bottom", data.x_label)
+        self.plot_widget.setLabel("left", data.y_label)
+        self.plot_widget.getPlotItem().enableAutoRange()
+        self.caption_label.setText(
+            f"Показано точек: {len(data.y):,}".replace(",", " ")
+        )
+
